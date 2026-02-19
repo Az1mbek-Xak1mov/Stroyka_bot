@@ -1,11 +1,13 @@
 """Telegram bot handlers (aiogram 3)."""
 
 import logging
+import re
 
 from aiogram import F, Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from db.database import async_session
 from db import crud
@@ -15,10 +17,24 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-# ── FSM for settle flow ──────────────────────────────────────────────────────
+def _parse_amount(text: str) -> float | None:
+    """Extract a number from user input like '1000', '1,000', '1000$'."""
+    s = text.replace(" ", "").replace(",", ".")
+    m = re.search(r"(\d+(\.\d+)?)", s)
+    if not m:
+        return None
+    val = float(m.group(1))
+    return val if val > 0 else None
+
+
+# ── FSM states ────────────────────────────────────────────────────────────────
 
 class SettleStates(StatesGroup):
     waiting_for_description = State()
+
+
+class EditExpenseStates(StatesGroup):
+    waiting_new_amount = State()
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
@@ -35,6 +51,9 @@ async def cmd_start(message: types.Message) -> None:
         "• `дал прорабу 4000, кирпич 2000, песок 1000`\n\n"
         "*Команды:*\n"
         "/report — отчёт по расходам\n"
+        "/expenses — последние расходы (✏️/🗑️)\n"
+        "/edit `<id> <сумма>` — изменить сумму\n"
+        "/delete `<id>` — удалить расход\n"
         "/categories — список категорий\n"
         "/foreman — баланс прораба\n"
         "/settle — закрыть выдачу прорабу\n"
@@ -181,6 +200,237 @@ async def settle_description(message: types.Message, state: FSMContext) -> None:
             + "\n".join(replies)
             + f"\n\nОстаток у прораба: *${balance['outstanding']:,.2f}*",
         )
+
+
+# ── /expenses — list recent expenses with edit/delete buttons ─────────────────
+
+@router.message(Command("expenses"))
+async def cmd_expenses(message: types.Message) -> None:
+    user_id = message.from_user.id
+    async with async_session() as session:
+        expenses = await crud.get_recent_expenses(session, user_id, limit=20)
+
+    if not expenses:
+        await message.answer("📋 Расходов пока нет.")
+        return
+
+    lines = ["📋 *Последние расходы:*\n"]
+    for exp in reversed(expenses):  # oldest first
+        cat_name = exp.category.name if exp.category else "—"
+        date_str = exp.created_at.strftime("%d.%m %H:%M") if exp.created_at else ""
+        lines.append(f"`#{exp.id}` *{cat_name}* — ${exp.amount:,.2f}  _{date_str}_")
+
+    lines.append(
+        "\n✏️ Изменить: /edit `<id> <сумма>`"
+        "\n🗑️ Удалить: /delete `<id>`"
+        "\nИли нажмите кнопку ниже:"
+    )
+
+    await message.answer("\n".join(lines))
+
+    # Send the last 5 with inline buttons for quick access
+    for exp in expenses[:5]:
+        cat_name = exp.category.name if exp.category else "—"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text=f"✏️ Изменить",
+                callback_data=f"edit:{exp.id}",
+            ),
+            InlineKeyboardButton(
+                text=f"🗑️ Удалить",
+                callback_data=f"del:{exp.id}",
+            ),
+        ]])
+        await message.answer(
+            f"`#{exp.id}` *{cat_name}* — ${exp.amount:,.2f}",
+            reply_markup=kb,
+        )
+
+
+# ── /edit <id> <amount> — quick edit via command ──────────────────────────────
+
+@router.message(Command("edit"))
+async def cmd_edit(message: types.Message) -> None:
+    parts = message.text.split()
+    if len(parts) < 3:
+        await message.answer("Использование: /edit `<id>` `<новая сумма>`\nПример: `/edit 5 1000`")
+        return
+
+    try:
+        expense_id = int(parts[1])
+    except ValueError:
+        await message.answer("⚠️ Неверный ID. Используйте число.")
+        return
+
+    new_amount = _parse_amount(parts[2])
+    if not new_amount:
+        await message.answer("⚠️ Не удалось распознать сумму.")
+        return
+
+    user_id = message.from_user.id
+    async with async_session() as session:
+        exp = await crud.update_expense_amount(session, expense_id, user_id, new_amount)
+        if not exp:
+            await message.answer("⚠️ Расход не найден или не принадлежит вам.")
+            return
+        await session.commit()
+        balance = await crud.get_foreman_balance(session, user_id)
+
+    cat_name = exp.category.name if exp.category else "—"
+    await message.answer(
+        f"✅ Расход `#{exp.id}` обновлён!\n"
+        f"Категория: *{cat_name}*\n"
+        f"Новая сумма: *${exp.amount:,.2f}*\n"
+        f"\n👷 Остаток у прораба: *${balance['outstanding']:,.2f}*"
+    )
+
+
+# ── /delete <id> — quick delete via command ───────────────────────────────────
+
+@router.message(Command("delete"))
+async def cmd_delete(message: types.Message) -> None:
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Использование: /delete `<id>`\nПример: `/delete 5`")
+        return
+
+    try:
+        expense_id = int(parts[1])
+    except ValueError:
+        await message.answer("⚠️ Неверный ID.")
+        return
+
+    user_id = message.from_user.id
+    async with async_session() as session:
+        ok = await crud.delete_expense(session, expense_id, user_id)
+        if not ok:
+            await message.answer("⚠️ Расход не найден или не принадлежит вам.")
+            return
+        await session.commit()
+        balance = await crud.get_foreman_balance(session, user_id)
+
+    await message.answer(
+        f"🗑️ Расход `#{expense_id}` удалён.\n"
+        f"👷 Остаток у прораба: *${balance['outstanding']:,.2f}*"
+    )
+
+
+# ── Inline button: edit ───────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("edit:"))
+async def cb_edit_expense(callback: types.CallbackQuery, state: FSMContext) -> None:
+    expense_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+
+    async with async_session() as session:
+        exp = await crud.get_expense_by_id(session, expense_id, user_id)
+
+    if not exp:
+        await callback.answer("Расход не найден.", show_alert=True)
+        return
+
+    cat_name = exp.category.name if exp.category else "—"
+    await state.update_data(edit_expense_id=expense_id)
+    await state.set_state(EditExpenseStates.waiting_new_amount)
+    await callback.message.answer(
+        f"✏️ Изменение расхода `#{exp.id}` (*{cat_name}* — ${exp.amount:,.2f})\n"
+        "Введите новую сумму:"
+    )
+    await callback.answer()
+
+
+# ── FSM: receive new amount ───────────────────────────────────────────────────
+
+@router.message(EditExpenseStates.waiting_new_amount)
+async def process_new_amount(message: types.Message, state: FSMContext) -> None:
+    if message.text and message.text.startswith("/"):
+        await state.clear()
+        await message.answer("Редактирование отменено.")
+        return
+
+    new_amount = _parse_amount(message.text or "")
+    if not new_amount:
+        await message.answer("⚠️ Не распознал сумму. Введите число (например `1000`). Или /cancel")
+        return
+
+    data = await state.get_data()
+    expense_id = data.get("edit_expense_id")
+    await state.clear()
+
+    user_id = message.from_user.id
+    async with async_session() as session:
+        exp = await crud.update_expense_amount(session, expense_id, user_id, new_amount)
+        if not exp:
+            await message.answer("⚠️ Расход не найден.")
+            return
+        await session.commit()
+        balance = await crud.get_foreman_balance(session, user_id)
+
+    cat_name = exp.category.name if exp.category else "—"
+    await message.answer(
+        f"✅ Расход `#{exp.id}` обновлён!\n"
+        f"Категория: *{cat_name}*\n"
+        f"Новая сумма: *${exp.amount:,.2f}*\n"
+        f"\n👷 Остаток у прораба: *${balance['outstanding']:,.2f}*"
+    )
+
+
+# ── Inline button: delete (with confirmation) ─────────────────────────────────
+
+@router.callback_query(F.data.startswith("del:"))
+async def cb_delete_expense(callback: types.CallbackQuery) -> None:
+    expense_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+
+    async with async_session() as session:
+        exp = await crud.get_expense_by_id(session, expense_id, user_id)
+
+    if not exp:
+        await callback.answer("Расход не найден.", show_alert=True)
+        return
+
+    cat_name = exp.category.name if exp.category else "—"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="✅ Да, удалить",
+            callback_data=f"confirm_del:{expense_id}",
+        ),
+        InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data="cancel_del",
+        ),
+    ]])
+    await callback.message.answer(
+        f"Удалить расход `#{exp.id}` (*{cat_name}* — ${exp.amount:,.2f})?\n",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("confirm_del:"))
+async def cb_confirm_delete(callback: types.CallbackQuery) -> None:
+    expense_id = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+
+    async with async_session() as session:
+        ok = await crud.delete_expense(session, expense_id, user_id)
+        if not ok:
+            await callback.answer("Расход не найден.", show_alert=True)
+            return
+        await session.commit()
+        balance = await crud.get_foreman_balance(session, user_id)
+
+    await callback.message.edit_text(
+        f"🗑️ Расход `#{expense_id}` удалён.\n"
+        f"👷 Остаток у прораба: *${balance['outstanding']:,.2f}*"
+    )
+    await callback.answer("Удалено!")
+
+
+@router.callback_query(F.data == "cancel_del")
+async def cb_cancel_delete(callback: types.CallbackQuery) -> None:
+    await callback.message.edit_text("Удаление отменено.")
+    await callback.answer()
 
 
 # ── Free-form message handler ────────────────────────────────────────────────

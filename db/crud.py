@@ -153,3 +153,61 @@ async def get_foreman_balance(session: AsyncSession, user_id: int) -> dict:
         "total_spent": total_spent,
         "outstanding": total_given - total_spent,
     }
+
+
+# ── Expense management (edit / delete) ────────────────────────────────────────
+
+async def get_recent_expenses(
+    session: AsyncSession, user_id: int, limit: int = 20
+) -> list[Expense]:
+    """Return the most recent expenses for this user, with category loaded."""
+    result = await session.execute(
+        select(Expense)
+        .where(Expense.telegram_user_id == user_id)
+        .order_by(Expense.created_at.desc())
+        .limit(limit)
+    )
+    expenses = list(result.scalars().all())
+    # Eagerly load category names
+    for exp in expenses:
+        await session.refresh(exp, ["category"])
+    return expenses
+
+
+async def get_expense_by_id(
+    session: AsyncSession, expense_id: int, user_id: int
+) -> Expense | None:
+    result = await session.execute(
+        select(Expense).where(
+            Expense.id == expense_id,
+            Expense.telegram_user_id == user_id,
+        )
+    )
+    exp = result.scalar_one_or_none()
+    if exp:
+        await session.refresh(exp, ["category"])
+    return exp
+
+
+async def update_expense_amount(
+    session: AsyncSession, expense_id: int, user_id: int, new_amount: float
+) -> Expense | None:
+    """Update the amount of an expense. Returns updated expense or None."""
+    exp = await get_expense_by_id(session, expense_id, user_id)
+    if exp is None:
+        return None
+    exp.amount = new_amount
+    await session.flush()
+    return exp
+
+
+async def delete_expense(
+    session: AsyncSession, expense_id: int, user_id: int
+) -> bool:
+    """Delete an expense by id. Returns True if deleted."""
+    exp = await get_expense_by_id(session, expense_id, user_id)
+    if exp is None:
+        return False
+    await session.delete(exp)
+    await session.flush()
+    return True
