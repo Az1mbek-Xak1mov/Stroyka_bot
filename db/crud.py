@@ -129,10 +129,10 @@ async def add_foreman_expense(
 
 async def get_foreman_balance(session: AsyncSession, user_id: int) -> dict:
     """
-    Balance-based foreman tracking per user.
-    total_given   = sum of this user's ForemanTransaction amounts
-    total_settled = sum of this user's Expense amounts where is_foreman_expense
-    outstanding   = total_given - total_settled
+    All money goes through the foreman.
+    total_given   = sum of ForemanTransaction amounts
+    total_spent   = sum of ALL Expense amounts (every expense = foreman spent)
+    outstanding   = total_given - total_spent
     """
     total_given_r = await session.execute(
         select(func.coalesce(func.sum(ForemanTransaction.amount), 0)).where(
@@ -141,16 +141,15 @@ async def get_foreman_balance(session: AsyncSession, user_id: int) -> dict:
     )
     total_given = float(total_given_r.scalar_one())
 
-    total_settled_r = await session.execute(
+    total_spent_r = await session.execute(
         select(func.coalesce(func.sum(Expense.amount), 0)).where(
-            Expense.is_foreman_expense == True,  # noqa: E712
             Expense.telegram_user_id == user_id,
         )
     )
-    total_settled = float(total_settled_r.scalar_one())
+    total_spent = float(total_spent_r.scalar_one())
 
     return {
         "total_given": total_given,
-        "total_settled": total_settled,
-        "outstanding": total_given - total_settled,
+        "total_spent": total_spent,
+        "outstanding": total_given - total_spent,
     }

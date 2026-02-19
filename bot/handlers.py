@@ -29,10 +29,10 @@ async def cmd_start(message: types.Message) -> None:
         "🏠 *Учёт расходов на строительство дома*\n\n"
         "Отправляйте мне сообщения о расходах, и я буду их учитывать.\n\n"
         "*Примеры:*\n"
-        "• `на кирпич 1000$`\n"
-        "• `цемент 500`\n"
-        "• `дал прорабу 5000`\n"
-        "• `прораб потратил 2000 на песок`\n\n"
+        "• `кирпич 1000$`\n"
+        "• `цемент 500, песок 300`\n"
+        "• `прораб 5000` (выдать прорабу)\n"
+        "• `дал прорабу 4000, кирпич 2000, песок 1000`\n\n"
         "*Команды:*\n"
         "/report — отчёт по расходам\n"
         "/categories — список категорий\n"
@@ -69,8 +69,8 @@ async def cmd_report(message: types.Message) -> None:
 
     lines.append(f"\n💰 *Итого расходов:* ${total:,.2f}")
     lines.append(f"\n👷 *Прорабу выдано:* ${foreman_balance['total_given']:,.2f}")
-    lines.append(f"👷 *Прораб отчитался:* ${foreman_balance['total_settled']:,.2f}")
-    lines.append(f"👷 *Неотчитанный остаток:* ${foreman_balance['outstanding']:,.2f}")
+    lines.append(f"👷 *Прораб потратил:* ${foreman_balance['total_spent']:,.2f}")
+    lines.append(f"👷 *Остаток у прораба:* ${foreman_balance['outstanding']:,.2f}")
 
     await message.answer("\n".join(lines))
 
@@ -102,14 +102,16 @@ async def cmd_foreman(message: types.Message) -> None:
     lines = [
         "👷 *Баланс прораба*\n",
         f"Выдано всего: ${balance['total_given']:,.2f}",
-        f"Отчитался: ${balance['total_settled']:,.2f}",
-        f"Неотчитанный остаток: ${balance['outstanding']:,.2f}",
+        f"Потрачено: ${balance['total_spent']:,.2f}",
+        f"Остаток: ${balance['outstanding']:,.2f}",
     ]
 
     if balance["outstanding"] > 0:
-        lines.append("\n⚠️ Прораб ещё не отчитался за все деньги.")
+        lines.append("\n💵 У прораба есть неизрасходованные деньги.")
+    elif balance["outstanding"] < 0:
+        lines.append("\n⚠️ Прораб потратил больше, чем ему выдали!")
     else:
-        lines.append("\n✅ Прораб отчитался за всё.")
+        lines.append("\n✅ Все деньги израсходованы.")
 
     await message.answer("\n".join(lines))
 
@@ -123,14 +125,14 @@ async def cmd_settle(message: types.Message, state: FSMContext) -> None:
         balance = await crud.get_foreman_balance(session, user_id)
 
     if balance["outstanding"] <= 0:
-        await message.answer("✅ Прораб отчитался за все деньги.")
+        await message.answer("✅ Все деньги израсходованы.")
         return
 
     await state.set_state(SettleStates.waiting_for_description)
     await message.answer(
-        f"👷 Неотчитанный остаток: *${balance['outstanding']:,.2f}*\n\n"
+        f"👷 Остаток у прораба: *${balance['outstanding']:,.2f}*\n\n"
         "Напишите, на что прораб потратил деньги.\n"
-        "Пример: `песок 2000` или `купил гвозди на 500`",
+        "Пример: `песок 2000` или `гвозди 500`",
     )
 
 
@@ -158,12 +160,12 @@ async def settle_description(message: types.Message, state: FSMContext) -> None:
                 continue
 
             cat = await crud.get_or_create_category(session, category_name)
-            expense = await crud.add_foreman_expense(
+            expense = await crud.add_expense(
                 session,
                 category_id=cat.id,
                 amount=amount,
                 telegram_user_id=user_id,
-                description=f"[отчёт прораба] {parsed.description or text}",
+                description=parsed.description or text,
             )
             replies.append(f"• *{cat.name}*: ${expense.amount:,.2f}")
 
@@ -228,37 +230,23 @@ async def handle_message(message: types.Message) -> None:
                     f"💰 Выдано прорабу: *${tx.amount:,.2f}*"
                 )
 
-            elif parsed.type == "foreman_report":
-                if parsed.amount is None or parsed.category is None:
-                    continue
-
-                cat = await crud.get_or_create_category(session, parsed.category)
-                expense = await crud.add_foreman_expense(
-                    session,
-                    category_id=cat.id,
-                    amount=parsed.amount,
-                    telegram_user_id=user_id,
-                    description=f"[отчёт прораба] {parsed.description or text}",
-                )
-                balance = await crud.get_foreman_balance(session, user_id)
-                replies.append(
-                    f"✅ Отчёт прораба: *{cat.name}* — *${expense.amount:,.2f}*\n"
-                    f"   Остаток у прораба: *${balance['outstanding']:,.2f}*"
-                )
-
             else:
                 has_unknown = True
 
         if replies:
             await session.commit()
+            balance = await crud.get_foreman_balance(session, user_id)
+            replies.append(
+                f"\n👷 Остаток у прораба: *${balance['outstanding']:,.2f}*"
+            )
             await message.answer("\n".join(replies))
         elif has_unknown:
             await message.answer(
                 "🤔 Не удалось понять сообщение.\n"
                 "Попробуйте написать, например:\n"
-                "• `на кирпич 1000`\n"
+                "• `кирпич 1000`\n"
                 "• `прораб 5000`\n"
-                "• `прораб потратил 2000 на песок`",
+                "• `цемент 500, песок 300`",
             )
         else:
             await message.answer(
