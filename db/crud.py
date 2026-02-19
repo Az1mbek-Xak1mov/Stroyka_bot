@@ -6,8 +6,16 @@ from db.models import Category, Expense, ForemanTransaction
 
 # ── Categories ────────────────────────────────────────────────────────────────
 
-async def get_all_categories(session: AsyncSession) -> list[Category]:
-    result = await session.execute(select(Category).order_by(Category.name))
+async def get_all_categories(session: AsyncSession, user_id: int) -> list[Category]:
+    """Return categories that this user has used (has expenses or foreman tx)."""
+    expense_cats = select(Expense.category_id).where(
+        Expense.telegram_user_id == user_id
+    )
+    result = await session.execute(
+        select(Category)
+        .where(Category.id.in_(expense_cats))
+        .order_by(Category.name)
+    )
     return list(result.scalars().all())
 
 
@@ -49,19 +57,26 @@ async def add_expense(
     return expense
 
 
-async def get_expenses_summary(session: AsyncSession) -> list[tuple[str, float]]:
-    """Return (category_name, total_amount) for all categories that have expenses."""
+async def get_expenses_summary(
+    session: AsyncSession, user_id: int
+) -> list[tuple[str, float]]:
+    """Return (category_name, total_amount) for this user's expenses."""
     result = await session.execute(
         select(Category.name, func.sum(Expense.amount))
         .join(Expense, Expense.category_id == Category.id)
+        .where(Expense.telegram_user_id == user_id)
         .group_by(Category.name)
         .order_by(Category.name)
     )
     return list(result.all())
 
 
-async def get_total_expenses(session: AsyncSession) -> float:
-    result = await session.execute(select(func.coalesce(func.sum(Expense.amount), 0)))
+async def get_total_expenses(session: AsyncSession, user_id: int) -> float:
+    result = await session.execute(
+        select(func.coalesce(func.sum(Expense.amount), 0)).where(
+            Expense.telegram_user_id == user_id
+        )
+    )
     return float(result.scalar_one())
 
 
@@ -84,10 +99,12 @@ async def add_foreman_transaction(
 
 
 async def get_all_foreman_transactions(
-    session: AsyncSession,
+    session: AsyncSession, user_id: int
 ) -> list[ForemanTransaction]:
     result = await session.execute(
-        select(ForemanTransaction).order_by(ForemanTransaction.created_at)
+        select(ForemanTransaction)
+        .where(ForemanTransaction.telegram_user_id == user_id)
+        .order_by(ForemanTransaction.created_at)
     )
     return list(result.scalars().all())
 
@@ -110,21 +127,24 @@ async def add_foreman_expense(
     )
 
 
-async def get_foreman_balance(session: AsyncSession) -> dict:
+async def get_foreman_balance(session: AsyncSession, user_id: int) -> dict:
     """
-    Balance-based foreman tracking.
-    total_given   = sum of all ForemanTransaction amounts
-    total_settled = sum of Expense amounts where is_foreman_expense = True
+    Balance-based foreman tracking per user.
+    total_given   = sum of this user's ForemanTransaction amounts
+    total_settled = sum of this user's Expense amounts where is_foreman_expense
     outstanding   = total_given - total_settled
     """
     total_given_r = await session.execute(
-        select(func.coalesce(func.sum(ForemanTransaction.amount), 0))
+        select(func.coalesce(func.sum(ForemanTransaction.amount), 0)).where(
+            ForemanTransaction.telegram_user_id == user_id
+        )
     )
     total_given = float(total_given_r.scalar_one())
 
     total_settled_r = await session.execute(
         select(func.coalesce(func.sum(Expense.amount), 0)).where(
-            Expense.is_foreman_expense == True  # noqa: E712
+            Expense.is_foreman_expense == True,  # noqa: E712
+            Expense.telegram_user_id == user_id,
         )
     )
     total_settled = float(total_settled_r.scalar_one())

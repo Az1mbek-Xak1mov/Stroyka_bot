@@ -23,10 +23,11 @@ logger = logging.getLogger(__name__)
 
 
 async def on_startup(bot: Bot) -> None:
-    """Create all tables if they don't exist."""
+    """Drop all tables and recreate them (full reset)."""
     async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables created / verified.")
+    logger.info("Database tables reset (drop + create).")
 
 
 async def main() -> None:
