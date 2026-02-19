@@ -147,31 +147,37 @@ async def settle_description(message: types.Message, state: FSMContext) -> None:
         cats = await crud.get_all_categories(session, user_id)
         cat_names = [c.name for c in cats]
 
-        parsed = await parse_message(text, cat_names)
-        category_name = parsed.category or "без категории"
-        amount = parsed.amount
+        items = await parse_message(text, cat_names)
+        replies: list[str] = []
 
-        if amount is None:
+        for parsed in items:
+            category_name = parsed.category or "без категории"
+            amount = parsed.amount
+
+            if amount is None:
+                continue
+
+            cat = await crud.get_or_create_category(session, category_name)
+            expense = await crud.add_foreman_expense(
+                session,
+                category_id=cat.id,
+                amount=amount,
+                telegram_user_id=user_id,
+                description=f"[отчёт прораба] {parsed.description or text}",
+            )
+            replies.append(f"• *{cat.name}*: ${expense.amount:,.2f}")
+
+        if not replies:
             await message.answer("⚠️ Не удалось понять сумму. Попробуйте ещё раз.")
             return
 
-        cat = await crud.get_or_create_category(session, category_name)
-        expense = await crud.add_foreman_expense(
-            session,
-            category_id=cat.id,
-            amount=amount,
-            telegram_user_id=user_id,
-            description=f"[отчёт прораба] {parsed.description or text}",
-        )
         await session.commit()
-
         balance = await crud.get_foreman_balance(session, user_id)
 
         await message.answer(
-            f"✅ Отчёт прораба записан!\n"
-            f"Категория: *{cat.name}*\n"
-            f"Сумма: *${expense.amount:,.2f}*\n"
-            f"Остаток у прораба: *${balance['outstanding']:,.2f}*",
+            "✅ Отчёт прораба записан!\n"
+            + "\n".join(replies)
+            + f"\n\nОстаток у прораба: *${balance['outstanding']:,.2f}*",
         )
 
 
@@ -186,85 +192,75 @@ async def handle_message(message: types.Message) -> None:
         cats = await crud.get_all_categories(session, user_id)
         cat_names = [c.name for c in cats]
 
-        parsed = await parse_message(text, cat_names)
+        items = await parse_message(text, cat_names)
 
-        if parsed.type == "expense":
-            if parsed.amount is None or parsed.category is None:
-                await message.answer(
-                    "⚠️ Не удалось понять сумму или категорию. Попробуйте ещё раз."
+        replies: list[str] = []
+        has_unknown = False
+
+        for parsed in items:
+            if parsed.type == "expense":
+                if parsed.amount is None or parsed.category is None:
+                    continue
+
+                cat = await crud.get_or_create_category(session, parsed.category)
+                expense = await crud.add_expense(
+                    session,
+                    category_id=cat.id,
+                    amount=parsed.amount,
+                    telegram_user_id=user_id,
+                    description=parsed.description,
                 )
-                return
-
-            cat = await crud.get_or_create_category(session, parsed.category)
-            expense = await crud.add_expense(
-                session,
-                category_id=cat.id,
-                amount=parsed.amount,
-                telegram_user_id=user_id,
-                description=parsed.description,
-            )
-            await session.commit()
-
-            await message.answer(
-                f"✅ Расход записан!\n"
-                f"Категория: *{cat.name}*\n"
-                f"Сумма: *${expense.amount:,.2f}*",
-            )
-
-        elif parsed.type == "foreman_give":
-            if parsed.amount is None:
-                await message.answer(
-                    "⚠️ Не удалось понять сумму. Попробуйте ещё раз."
+                replies.append(
+                    f"✅ Расход: *{cat.name}* — *${expense.amount:,.2f}*"
                 )
-                return
 
-            tx = await crud.add_foreman_transaction(
-                session,
-                amount=parsed.amount,
-                telegram_user_id=user_id,
-                description=parsed.description,
-            )
-            await session.commit()
+            elif parsed.type == "foreman_give":
+                if parsed.amount is None:
+                    continue
 
-            await message.answer(
-                f"💰 Записано: выдано прорабу *${tx.amount:,.2f}*\n"
-                f"Выдача #{tx.id} (не закрыта)\n\n"
-                "Когда прораб отчитается, используйте /settle "
-                "или отправьте сообщение вроде "
-                "`прораб потратил 2000 на песок`.",
-            )
-
-        elif parsed.type == "foreman_report":
-            if parsed.amount is None or parsed.category is None:
-                await message.answer(
-                    "⚠️ Не удалось понять отчёт прораба. Попробуйте ещё раз."
+                tx = await crud.add_foreman_transaction(
+                    session,
+                    amount=parsed.amount,
+                    telegram_user_id=user_id,
+                    description=parsed.description,
                 )
-                return
+                replies.append(
+                    f"💰 Выдано прорабу: *${tx.amount:,.2f}*"
+                )
 
-            cat = await crud.get_or_create_category(session, parsed.category)
-            expense = await crud.add_foreman_expense(
-                session,
-                category_id=cat.id,
-                amount=parsed.amount,
-                telegram_user_id=user_id,
-                description=f"[отчёт прораба] {parsed.description or text}",
-            )
+            elif parsed.type == "foreman_report":
+                if parsed.amount is None or parsed.category is None:
+                    continue
+
+                cat = await crud.get_or_create_category(session, parsed.category)
+                expense = await crud.add_foreman_expense(
+                    session,
+                    category_id=cat.id,
+                    amount=parsed.amount,
+                    telegram_user_id=user_id,
+                    description=f"[отчёт прораба] {parsed.description or text}",
+                )
+                balance = await crud.get_foreman_balance(session, user_id)
+                replies.append(
+                    f"✅ Отчёт прораба: *{cat.name}* — *${expense.amount:,.2f}*\n"
+                    f"   Остаток у прораба: *${balance['outstanding']:,.2f}*"
+                )
+
+            else:
+                has_unknown = True
+
+        if replies:
             await session.commit()
-
-            balance = await crud.get_foreman_balance(session, user_id)
-
-            await message.answer(
-                f"✅ Отчёт прораба записан!\n"
-                f"Категория: *{cat.name}*\n"
-                f"Сумма: *${expense.amount:,.2f}*\n"
-                f"Остаток у прораба: *${balance['outstanding']:,.2f}*",
-            )
-
-        else:
+            await message.answer("\n".join(replies))
+        elif has_unknown:
             await message.answer(
                 "🤔 Не удалось понять сообщение.\n"
                 "Попробуйте написать, например:\n"
                 "• `на кирпич 1000`\n"
-                "• `дал прорабу 5000`\n"
+                "• `прораб 5000`\n"
                 "• `прораб потратил 2000 на песок`",
+            )
+        else:
+            await message.answer(
+                "⚠️ Не удалось разобрать данные. Попробуйте ещё раз."
             )

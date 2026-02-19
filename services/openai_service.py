@@ -15,30 +15,45 @@ SYSTEM_PROMPT = """\
 Ты — помощник, который разбирает сообщения о расходах на строительство дома.
 Сообщения приходят на русском языке.
 
-Из сообщения пользователя извлеки структурированные данные и верни ТОЛЬКО валидный JSON (без markdown-блоков).
+ОДНО СООБЩЕНИЕ МОЖЕТ СОДЕРЖАТЬ НЕСКОЛЬКО ПОЗИЦИЙ (расходов, выдач и т.д.).
+Извлеки ВСЕ позиции и верни их как JSON-МАССИВ.
 
-Возможные типы сообщений:
+Возможные типы элементов:
 1. **expense** — прямой расход на материалы / работу.
    Примеры: «на кирпич 1000», «цемент 500», «заплатил сантехнику 200»
-   → {"type": "expense", "category": "<материал или работа>", "amount": <число>, "description": "<исходный текст>"}
+   → {"type": "expense", "category": "<материал/работа>", "amount": <число>, "description": "<описание>"}
 
 2. **foreman_give** — деньги переданы прорабу (ещё не потрачены).
-   Примеры: «дал прорабу 5000», «прораб получил 3000»
-   → {"type": "foreman_give", "amount": <число>, "description": "<исходный текст>"}
+   Примеры: «дал прорабу 5000», «прораб получил 3000», «прораб 1000», «прорабу 2000$»
+   ВАЖНО: если пользователь пишет просто «прораб <сумма>» или «прорабу <сумма>» 
+   БЕЗ слов «потратил/купил/расход» — это ВСЕГДА foreman_give (выдача денег прорабу).
+   → {"type": "foreman_give", "amount": <число>, "description": "<описание>"}
 
 3. **foreman_report** — прораб отчитывается, на что потратил деньги.
    Примеры: «прораб потратил 2000 на песок», «прораб купил гвозди на 500»
-   → {"type": "foreman_report", "category": "<материал или работа>", "amount": <число>, "description": "<исходный текст>"}
+   Ключевые слова: потратил, купил, израсходовал.
+   → {"type": "foreman_report", "category": "<материал/работа>", "amount": <число>, "description": "<описание>"}
 
 4. **unknown** — не удалось определить.
    → {"type": "unknown"}
 
 Правила:
-- category — одно слово или короткая фраза на русском языке в нижнем регистре.
-- amount — всегда положительное число (без символа валюты). Валюта по умолчанию — доллар ($).
-- Если пользователь пишет число без указания валюты, считай что это доллары.
-- Категория должна быть на русском языке.
-- Верни ТОЛЬКО JSON-объект, ничего больше.
+- ВСЕГДА возвращай JSON-МАССИВ, даже если в сообщении одна позиция: [{...}]
+- category — одно слово или короткая фраза на русском в нижнем регистре.
+- amount — положительное число без символа валюты. Валюта по умолчанию — доллар ($).
+- Если пользователь пишет число без валюты, считай что это доллары.
+- Категория на русском языке.
+- Верни ТОЛЬКО JSON-массив, без markdown-блоков, без пояснений.
+
+Примеры:
+Сообщение: «расходы: Цемент 2000$ кирпич - 200$»
+Ответ: [{"type":"expense","category":"цемент","amount":2000,"description":"цемент 2000$"},{"type":"expense","category":"кирпич","amount":200,"description":"кирпич 200$"}]
+
+Сообщение: «Прораб 1000$»
+Ответ: [{"type":"foreman_give","amount":1000,"description":"прораб 1000$"}]
+
+Сообщение: «цемент 500 и дал прорабу 3000»
+Ответ: [{"type":"expense","category":"цемент","amount":500,"description":"цемент 500"},{"type":"foreman_give","amount":3000,"description":"дал прорабу 3000"}]
 """
 
 
@@ -50,8 +65,10 @@ class ParsedExpense:
     description: str | None = None
 
 
-async def parse_message(text: str, existing_categories: list[str]) -> ParsedExpense:
-    """Send the user message + known categories to GPT and parse the response."""
+async def parse_message(
+    text: str, existing_categories: list[str]
+) -> list[ParsedExpense]:
+    """Send the user message + known categories to GPT and return a list of parsed items."""
 
     categories_hint = (
         f"Существующие категории в базе данных: {', '.join(existing_categories)}. "
@@ -81,11 +98,25 @@ async def parse_message(text: str, existing_categories: list[str]) -> ParsedExpe
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        return ParsedExpense(type="unknown")
+        return [ParsedExpense(type="unknown")]
 
-    return ParsedExpense(
-        type=data.get("type", "unknown"),
-        category=data.get("category"),
-        amount=float(data["amount"]) if data.get("amount") is not None else None,
-        description=data.get("description"),
-    )
+    # Normalise: if GPT returned a single dict, wrap it in a list
+    if isinstance(data, dict):
+        data = [data]
+
+    items: list[ParsedExpense] = []
+    for entry in data:
+        items.append(
+            ParsedExpense(
+                type=entry.get("type", "unknown"),
+                category=entry.get("category"),
+                amount=(
+                    float(entry["amount"])
+                    if entry.get("amount") is not None
+                    else None
+                ),
+                description=entry.get("description"),
+            )
+        )
+
+    return items if items else [ParsedExpense(type="unknown")]
