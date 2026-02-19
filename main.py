@@ -9,8 +9,6 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from dotenv import load_dotenv
 
-from db.database import engine
-from db.models import Base
 from bot.handlers import router
 
 load_dotenv()
@@ -23,11 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 async def on_startup(bot: Bot) -> None:
-    """Drop all tables and recreate them (full reset)."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables reset (drop + create).")
+    """Log that bot is starting — migrations are run before this via CMD."""
+    logger.info("Bot startup hook called. Migrations already applied.")
+
 
 
 async def main() -> None:
