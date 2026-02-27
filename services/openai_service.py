@@ -27,7 +27,7 @@ SYSTEM_PROMPT = """\
    → {"type": "expense", "category": "<материал/работа>", "amount": <число>, "description": "<описание>"}
 
 2. **foreman_give** — деньги переданы прорабу (пополнение бюджета прораба).
-   Примеры: «дал прорабу 5000», «прораб получил 3000», «прораб 1000», «прорабу 2000$»
+   Примеры: «дал прорабу 5000», «прораб получил 3000», «прораб 1000», «прорабу 2000»
    ВАЖНО: если пользователь пишет «прораб <сумма>» или «прорабу <сумма>» или «дал прорабу <сумма>»
    БЕЗ указания на что именно (без слов «потратил/купил/на + материал») — это foreman_give.
    → {"type": "foreman_give", "amount": <число>, "description": "<описание>"}
@@ -46,14 +46,14 @@ SYSTEM_PROMPT = """\
 Сообщение: «дал прорабу 4000, кирпич 2000, песок 1000»
 Ответ: [{"type":"foreman_give","amount":4000,"description":"дал прорабу 4000"},{"type":"expense","category":"кирпич","amount":2000,"description":"кирпич 2000"},{"type":"expense","category":"песок","amount":1000,"description":"песок 1000"}]
 
-Сообщение: «Прораб 1000$»
-Ответ: [{"type":"foreman_give","amount":1000,"description":"прораб 1000$"}]
+Сообщение: «Прораб 1000»
+Ответ: [{"type":"foreman_give","amount":1000,"description":"прораб 1000"}]
 
 Сообщение: «прораб потратил 2000 на песок»
 Ответ: [{"type":"expense","category":"песок","amount":2000,"description":"прораб потратил 2000 на песок"}]
 
-Сообщение: «расходы: Цемент 2000$ кирпич - 200$»
-Ответ: [{"type":"expense","category":"цемент","amount":2000,"description":"цемент 2000$"},{"type":"expense","category":"кирпич","amount":200,"description":"кирпич 200$"}]
+Сообщение: «расходы: Цемент 2000 кирпич - 200»
+Ответ: [{"type":"expense","category":"цемент","amount":2000,"description":"цемент 2000"},{"type":"expense","category":"кирпич","amount":200,"description":"кирпич 200"}]
 """
 
 
@@ -66,7 +66,7 @@ class ParsedExpense:
 
 
 async def parse_message(
-    text: str, existing_categories: list[str]
+    text: str, existing_categories: list[str], photo_b64: str | None = None
 ) -> list[ParsedExpense]:
     """Send the user message + known categories to GPT and return a list of parsed items."""
 
@@ -77,16 +77,26 @@ async def parse_message(
         else "Категорий пока нет."
     )
 
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+    ]
+    
+    user_content = []
+    text_content = f"{categories_hint}\n\nСообщение пользователя: {text}"
+    user_content.append({"type": "text", "text": text_content})
+    
+    if photo_b64:
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{photo_b64}"}
+        })
+        
+    messages.append({"role": "user", "content": user_content})
+
     response = await client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         temperature=0,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": f"{categories_hint}\n\nСообщение пользователя: {text}",
-            },
-        ],
+        messages=messages,
     )
 
     raw = response.choices[0].message.content.strip()

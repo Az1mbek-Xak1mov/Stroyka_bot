@@ -45,7 +45,7 @@ async def cmd_start(message: types.Message) -> None:
         "🏠 *Учёт расходов на строительство дома*\n\n"
         "Отправляйте мне сообщения о расходах, и я буду их учитывать.\n\n"
         "*Примеры:*\n"
-        "• `кирпич 1000$`\n"
+        "• `кирпич 1000`\n"
         "• `цемент 500, песок 300`\n"
         "• `прораб 5000` (выдать прорабу)\n"
         "• `дал прорабу 4000, кирпич 2000, песок 1000`\n\n"
@@ -84,12 +84,12 @@ async def cmd_report(message: types.Message) -> None:
 
     lines = ["📊 *Отчёт по расходам*\n"]
     for cat_name, cat_total in summary:
-        lines.append(f"• *{cat_name}*: ${cat_total:,.2f}")
+        lines.append(f"• *{cat_name}*: {cat_total:,.0f} UZS")
 
-    lines.append(f"\n💰 *Итого расходов:* ${total:,.2f}")
-    lines.append(f"\n👷 *Прорабу выдано:* ${foreman_balance['total_given']:,.2f}")
-    lines.append(f"👷 *Прораб потратил:* ${foreman_balance['total_spent']:,.2f}")
-    lines.append(f"👷 *Остаток у прораба:* ${foreman_balance['outstanding']:,.2f}")
+    lines.append(f"\n💰 *Итого расходов:* {total:,.0f} UZS")
+    lines.append(f"\n👷 *Прорабу выдано:* {foreman_balance['total_given']:,.0f} UZS")
+    lines.append(f"👷 *Прораб потратил:* {foreman_balance['total_spent']:,.0f} UZS")
+    lines.append(f"👷 *Остаток у прораба:* {foreman_balance['outstanding']:,.0f} UZS")
 
     await message.answer("\n".join(lines))
 
@@ -120,9 +120,9 @@ async def cmd_foreman(message: types.Message) -> None:
 
     lines = [
         "👷 *Баланс прораба*\n",
-        f"Выдано всего: ${balance['total_given']:,.2f}",
-        f"Потрачено: ${balance['total_spent']:,.2f}",
-        f"Остаток: ${balance['outstanding']:,.2f}",
+        f"Выдано всего: {balance['total_given']:,.0f} UZS",
+        f"Потрачено: {balance['total_spent']:,.0f} UZS",
+        f"Остаток: {balance['outstanding']:,.0f} UZS",
     ]
 
     if balance["outstanding"] > 0:
@@ -149,7 +149,7 @@ async def cmd_settle(message: types.Message, state: FSMContext) -> None:
 
     await state.set_state(SettleStates.waiting_for_description)
     await message.answer(
-        f"👷 Остаток у прораба: *${balance['outstanding']:,.2f}*\n\n"
+        f"👷 Остаток у прораба: *{balance['outstanding']:,.0f} UZS*\n\n"
         "Напишите, на что прораб потратил деньги.\n"
         "Пример: `песок 2000` или `гвозди 500`",
     )
@@ -161,14 +161,22 @@ async def cmd_settle(message: types.Message, state: FSMContext) -> None:
 async def settle_description(message: types.Message, state: FSMContext) -> None:
     await state.clear()
 
-    text = message.text
+    text = message.caption or message.text or ""
     user_id = message.from_user.id
+    
+    photo_b64 = None
+    if message.photo:
+        photo = message.photo[-1]
+        file_info = await message.bot.get_file(photo.file_id)
+        downloaded_file = await message.bot.download_file(file_info.file_path)
+        if downloaded_file:
+            photo_b64 = base64.b64encode(downloaded_file.read()).decode('utf-8')
 
     async with async_session() as session:
         cats = await crud.get_all_categories(session, user_id)
         cat_names = [c.name for c in cats]
 
-        items = await parse_message(text, cat_names)
+        items = await parse_message(text, cat_names, photo_b64=photo_b64)
         replies: list[str] = []
 
         for parsed in items:
@@ -186,7 +194,7 @@ async def settle_description(message: types.Message, state: FSMContext) -> None:
                 telegram_user_id=user_id,
                 description=parsed.description or text,
             )
-            replies.append(f"• *{cat.name}*: ${expense.amount:,.2f}")
+            replies.append(f"• *{cat.name}*: {expense.amount:,.0f} UZS")
 
         if not replies:
             await message.answer("⚠️ Не удалось понять сумму. Попробуйте ещё раз.")
@@ -198,7 +206,7 @@ async def settle_description(message: types.Message, state: FSMContext) -> None:
         await message.answer(
             "✅ Отчёт прораба записан!\n"
             + "\n".join(replies)
-            + f"\n\nОстаток у прораба: *${balance['outstanding']:,.2f}*",
+            + f"\n\nОстаток у прораба: *{balance['outstanding']:,.0f} UZS*",
         )
 
 
@@ -218,7 +226,7 @@ async def cmd_expenses(message: types.Message) -> None:
     for exp in reversed(expenses):  # oldest first
         cat_name = exp.category.name if exp.category else "—"
         date_str = exp.created_at.strftime("%d.%m %H:%M") if exp.created_at else ""
-        lines.append(f"`#{exp.id}` *{cat_name}* — ${exp.amount:,.2f}  _{date_str}_")
+        lines.append(f"`#{exp.id}` *{cat_name}* — {exp.amount:,.0f} UZS  _{date_str}_")
 
     lines.append(
         "\n✏️ Изменить: /edit `<id> <сумма>`"
@@ -242,7 +250,7 @@ async def cmd_expenses(message: types.Message) -> None:
             ),
         ]])
         await message.answer(
-            f"`#{exp.id}` *{cat_name}* — ${exp.amount:,.2f}",
+            f"`#{exp.id}` *{cat_name}* — {exp.amount:,.0f} UZS",
             reply_markup=kb,
         )
 
@@ -280,8 +288,8 @@ async def cmd_edit(message: types.Message) -> None:
     await message.answer(
         f"✅ Расход `#{exp.id}` обновлён!\n"
         f"Категория: *{cat_name}*\n"
-        f"Новая сумма: *${exp.amount:,.2f}*\n"
-        f"\n👷 Остаток у прораба: *${balance['outstanding']:,.2f}*"
+        f"Новая сумма: *{exp.amount:,.0f} UZS*\n"
+        f"\n👷 Остаток у прораба: *{balance['outstanding']:,.0f} UZS*"
     )
 
 
@@ -311,7 +319,7 @@ async def cmd_delete(message: types.Message) -> None:
 
     await message.answer(
         f"🗑️ Расход `#{expense_id}` удалён.\n"
-        f"👷 Остаток у прораба: *${balance['outstanding']:,.2f}*"
+        f"👷 Остаток у прораба: *{balance['outstanding']:,.0f} UZS*"
     )
 
 
@@ -333,7 +341,7 @@ async def cb_edit_expense(callback: types.CallbackQuery, state: FSMContext) -> N
     await state.update_data(edit_expense_id=expense_id)
     await state.set_state(EditExpenseStates.waiting_new_amount)
     await callback.message.answer(
-        f"✏️ Изменение расхода `#{exp.id}` (*{cat_name}* — ${exp.amount:,.2f})\n"
+        f"✏️ Изменение расхода `#{exp.id}` (*{cat_name}* — {exp.amount:,.0f} UZS)\n"
         "Введите новую сумму:"
     )
     await callback.answer()
@@ -370,8 +378,8 @@ async def process_new_amount(message: types.Message, state: FSMContext) -> None:
     await message.answer(
         f"✅ Расход `#{exp.id}` обновлён!\n"
         f"Категория: *{cat_name}*\n"
-        f"Новая сумма: *${exp.amount:,.2f}*\n"
-        f"\n👷 Остаток у прораба: *${balance['outstanding']:,.2f}*"
+        f"Новая сумма: *{exp.amount:,.0f} UZS*\n"
+        f"\n👷 Остаток у прораба: *{balance['outstanding']:,.0f} UZS*"
     )
 
 
@@ -401,7 +409,7 @@ async def cb_delete_expense(callback: types.CallbackQuery) -> None:
         ),
     ]])
     await callback.message.answer(
-        f"Удалить расход `#{exp.id}` (*{cat_name}* — ${exp.amount:,.2f})?\n",
+        f"Удалить расход `#{exp.id}` (*{cat_name}* — {exp.amount:,.0f} UZS)?\n",
         reply_markup=kb,
     )
     await callback.answer()
@@ -422,7 +430,7 @@ async def cb_confirm_delete(callback: types.CallbackQuery) -> None:
 
     await callback.message.edit_text(
         f"🗑️ Расход `#{expense_id}` удалён.\n"
-        f"👷 Остаток у прораба: *${balance['outstanding']:,.2f}*"
+        f"👷 Остаток у прораба: *{balance['outstanding']:,.0f} UZS*"
     )
     await callback.answer("Удалено!")
 
@@ -435,16 +443,26 @@ async def cb_cancel_delete(callback: types.CallbackQuery) -> None:
 
 # ── Free-form message handler ────────────────────────────────────────────────
 
-@router.message(F.text)
+import base64
+
+@router.message(F.text | F.photo)
 async def handle_message(message: types.Message) -> None:
-    text = message.text
+    text = message.caption or message.text or ""
     user_id = message.from_user.id
+
+    photo_b64 = None
+    if message.photo:
+        photo = message.photo[-1]
+        file_info = await message.bot.get_file(photo.file_id)
+        downloaded_file = await message.bot.download_file(file_info.file_path)
+        if downloaded_file:
+            photo_b64 = base64.b64encode(downloaded_file.read()).decode('utf-8')
 
     async with async_session() as session:
         cats = await crud.get_all_categories(session, user_id)
         cat_names = [c.name for c in cats]
 
-        items = await parse_message(text, cat_names)
+        items = await parse_message(text, cat_names, photo_b64=photo_b64)
 
         replies: list[str] = []
         has_unknown = False
@@ -463,7 +481,7 @@ async def handle_message(message: types.Message) -> None:
                     description=parsed.description,
                 )
                 replies.append(
-                    f"✅ Расход: *{cat.name}* — *${expense.amount:,.2f}*"
+                    f"✅ Расход: *{cat.name}* — *{expense.amount:,.0f} UZS*"
                 )
 
             elif parsed.type == "foreman_give":
@@ -477,7 +495,7 @@ async def handle_message(message: types.Message) -> None:
                     description=parsed.description,
                 )
                 replies.append(
-                    f"💰 Выдано прорабу: *${tx.amount:,.2f}*"
+                    f"💰 Выдано прорабу: *{tx.amount:,.0f} UZS*"
                 )
 
             else:
@@ -487,7 +505,7 @@ async def handle_message(message: types.Message) -> None:
             await session.commit()
             balance = await crud.get_foreman_balance(session, user_id)
             replies.append(
-                f"\n👷 Остаток у прораба: *${balance['outstanding']:,.2f}*"
+                f"\n👷 Остаток у прораба: *{balance['outstanding']:,.0f} UZS*"
             )
             await message.answer("\n".join(replies))
         elif has_unknown:
