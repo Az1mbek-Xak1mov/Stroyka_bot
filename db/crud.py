@@ -1,3 +1,5 @@
+from datetime import date
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -6,33 +8,26 @@ from db.models import Category, Expense, ForemanTransaction
 
 # ── Categories ────────────────────────────────────────────────────────────────
 
-async def get_all_categories(session: AsyncSession, user_id: int) -> list[Category]:
-    """Return categories that this user has used (has expenses or foreman tx)."""
-    expense_cats = select(Expense.category_id).where(
-        Expense.telegram_user_id == user_id
-    )
-    result = await session.execute(
-        select(Category)
-        .where(Category.id.in_(expense_cats))
-        .order_by(Category.name)
-    )
-    return list(result.scalars().all())
-
-
-async def get_category_by_name(session: AsyncSession, name: str) -> Category | None:
-    result = await session.execute(
-        select(Category).where(func.lower(Category.name) == name.lower())
-    )
-    return result.scalar_one_or_none()
-
-
-async def get_or_create_category(session: AsyncSession, name: str) -> Category:
-    category = await get_category_by_name(session, name)
-    if category is None:
-        category = Category(name=name.strip().lower())
-        session.add(category)
-        await session.flush()
+async def create_category(session: AsyncSession, name: str) -> Category:
+    """Always create a new category row (categories are NOT unique)."""
+    category = Category(name=name.strip())
+    session.add(category)
+    await session.flush()
     return category
+
+
+async def get_unique_category_names(
+    session: AsyncSession, user_id: int
+) -> list[str]:
+    """Return distinct lowercase category names for this user."""
+    result = await session.execute(
+        select(func.lower(Category.name))
+        .join(Expense, Expense.category_id == Category.id)
+        .where(Expense.telegram_user_id == user_id)
+        .group_by(func.lower(Category.name))
+        .order_by(func.lower(Category.name))
+    )
+    return [row[0] for row in result.all()]
 
 
 # ── Expenses ──────────────────────────────────────────────────────────────────
@@ -44,6 +39,7 @@ async def add_expense(
     telegram_user_id: int,
     description: str | None = None,
     is_foreman_expense: bool = False,
+    expense_date: date | None = None,
 ) -> Expense:
     expense = Expense(
         category_id=category_id,
@@ -51,6 +47,7 @@ async def add_expense(
         description=description,
         telegram_user_id=telegram_user_id,
         is_foreman_expense=is_foreman_expense,
+        expense_date=expense_date,
     )
     session.add(expense)
     await session.flush()
@@ -60,13 +57,13 @@ async def add_expense(
 async def get_expenses_summary(
     session: AsyncSession, user_id: int
 ) -> list[tuple[str, float]]:
-    """Return (category_name, total_amount) for this user's expenses."""
+    """Return (category_name_lower, total_amount) grouped by lowercase name."""
     result = await session.execute(
-        select(Category.name, func.sum(Expense.amount))
+        select(func.lower(Category.name), func.sum(Expense.amount))
         .join(Expense, Expense.category_id == Category.id)
         .where(Expense.telegram_user_id == user_id)
-        .group_by(Category.name)
-        .order_by(Category.name)
+        .group_by(func.lower(Category.name))
+        .order_by(func.lower(Category.name))
     )
     return list(result.all())
 
@@ -87,11 +84,13 @@ async def add_foreman_transaction(
     amount: float,
     telegram_user_id: int,
     description: str | None = None,
+    expense_date: date | None = None,
 ) -> ForemanTransaction:
     tx = ForemanTransaction(
         amount=amount,
         description=description,
         telegram_user_id=telegram_user_id,
+        expense_date=expense_date,
     )
     session.add(tx)
     await session.flush()

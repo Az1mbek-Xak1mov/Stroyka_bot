@@ -2,6 +2,7 @@
 
 import logging
 import re
+from datetime import date, datetime
 
 from aiogram import F, Router, types
 from aiogram.filters import Command
@@ -27,6 +28,18 @@ def _parse_amount(text: str) -> float | None:
     return val if val > 0 else None
 
 
+def _parse_date(date_str: str | None) -> date | None:
+    """Parse 'dd.mm.yyyy' or 'dd.mm.yy' into a date object."""
+    if not date_str:
+        return None
+    for fmt in ("%d.%m.%Y", "%d.%m.%y"):
+        try:
+            return datetime.strptime(date_str.strip(), fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 # ── FSM states ────────────────────────────────────────────────────────────────
 
 class SettleStates(StatesGroup):
@@ -45,10 +58,10 @@ async def cmd_start(message: types.Message) -> None:
         "🏠 *Учёт расходов на строительство дома*\n\n"
         "Отправляйте мне сообщения о расходах, и я буду их учитывать.\n\n"
         "*Примеры:*\n"
-        "• `кирпич 1000`\n"
-        "• `цемент 500, песок 300`\n"
-        "• `прораб 5000` (выдать прорабу)\n"
-        "• `дал прорабу 4000, кирпич 2000, песок 1000`\n\n"
+        "• `кирпич - 1000000`\n"
+        "• `Мих 12та - 230000`\n"
+        "• `прорабу - 5000000`\n"
+        "• Дата в сообщении: `28.02.2026`\n\n"
         "*Команды:*\n"
         "/report — отчёт по расходам\n"
         "/expenses — последние расходы (✏️/🗑️)\n"
@@ -100,13 +113,13 @@ async def cmd_report(message: types.Message) -> None:
 async def cmd_categories(message: types.Message) -> None:
     user_id = message.from_user.id
     async with async_session() as session:
-        cats = await crud.get_all_categories(session, user_id)
+        cat_names = await crud.get_unique_category_names(session, user_id)
 
-    if not cats:
+    if not cat_names:
         await message.answer("📂 Категорий пока нет.")
         return
 
-    text = "📂 *Категории:*\n" + "\n".join(f"• {c.name}" for c in cats)
+    text = "📂 *Категории:*\n" + "\n".join(f"• {name}" for name in cat_names)
     await message.answer(text)
 
 
@@ -173,28 +186,28 @@ async def settle_description(message: types.Message, state: FSMContext) -> None:
             photo_b64 = base64.b64encode(downloaded_file.read()).decode('utf-8')
 
     async with async_session() as session:
-        cats = await crud.get_all_categories(session, user_id)
-        cat_names = [c.name for c in cats]
-
-        items = await parse_message(text, cat_names, photo_b64=photo_b64)
+        items = await parse_message(text, photo_b64=photo_b64)
         replies: list[str] = []
 
         for parsed in items:
             category_name = parsed.category or "без категории"
             amount = parsed.amount
+            exp_date = _parse_date(parsed.date) or date.today()
 
             if amount is None:
                 continue
 
-            cat = await crud.get_or_create_category(session, category_name)
+            cat = await crud.create_category(session, category_name)
             expense = await crud.add_expense(
                 session,
                 category_id=cat.id,
                 amount=amount,
                 telegram_user_id=user_id,
                 description=parsed.description or text,
+                expense_date=exp_date,
             )
-            replies.append(f"• *{cat.name}*: {expense.amount:,.0f} UZS")
+            date_label = exp_date.strftime('%d.%m.%Y')
+            replies.append(f"• *{cat.name}*: {expense.amount:,.0f} UZS ({date_label})")
 
         if not replies:
             await message.answer("⚠️ Не удалось понять сумму. Попробуйте ещё раз.")
@@ -204,9 +217,9 @@ async def settle_description(message: types.Message, state: FSMContext) -> None:
         balance = await crud.get_foreman_balance(session, user_id)
 
         await message.answer(
-            "✅ Отчёт прораба записан!\n"
+            "✅ Записано!\n"
             + "\n".join(replies)
-            + f"\n\nОстаток у прораба: *{balance['outstanding']:,.0f} UZS*",
+            + f"\n\n👷 Остаток у прораба: *{balance['outstanding']:,.0f} UZS*",
         )
 
 
@@ -225,7 +238,7 @@ async def cmd_expenses(message: types.Message) -> None:
     lines = ["📋 *Последние расходы:*\n"]
     for exp in reversed(expenses):  # oldest first
         cat_name = exp.category.name if exp.category else "—"
-        date_str = exp.created_at.strftime("%d.%m %H:%M") if exp.created_at else ""
+        date_str = exp.expense_date.strftime("%d.%m.%Y") if exp.expense_date else (exp.created_at.strftime("%d.%m.%Y") if exp.created_at else "")
         lines.append(f"`#{exp.id}` *{cat_name}* — {exp.amount:,.0f} UZS  _{date_str}_")
 
     lines.append(
@@ -459,29 +472,30 @@ async def handle_message(message: types.Message) -> None:
             photo_b64 = base64.b64encode(downloaded_file.read()).decode('utf-8')
 
     async with async_session() as session:
-        cats = await crud.get_all_categories(session, user_id)
-        cat_names = [c.name for c in cats]
-
-        items = await parse_message(text, cat_names, photo_b64=photo_b64)
+        items = await parse_message(text, photo_b64=photo_b64)
 
         replies: list[str] = []
         has_unknown = False
 
         for parsed in items:
+            exp_date = _parse_date(parsed.date) or date.today()
+            date_label = exp_date.strftime('%d.%m.%Y')
+
             if parsed.type == "expense":
                 if parsed.amount is None or parsed.category is None:
                     continue
 
-                cat = await crud.get_or_create_category(session, parsed.category)
+                cat = await crud.create_category(session, parsed.category)
                 expense = await crud.add_expense(
                     session,
                     category_id=cat.id,
                     amount=parsed.amount,
                     telegram_user_id=user_id,
                     description=parsed.description,
+                    expense_date=exp_date,
                 )
                 replies.append(
-                    f"✅ Расход: *{cat.name}* — *{expense.amount:,.0f} UZS*"
+                    f"✅ *{cat.name}* — *{expense.amount:,.0f} UZS* ({date_label})"
                 )
 
             elif parsed.type == "foreman_give":
@@ -493,9 +507,10 @@ async def handle_message(message: types.Message) -> None:
                     amount=parsed.amount,
                     telegram_user_id=user_id,
                     description=parsed.description,
+                    expense_date=exp_date,
                 )
                 replies.append(
-                    f"💰 Выдано прорабу: *{tx.amount:,.0f} UZS*"
+                    f"💰 Выдано прорабу: *{tx.amount:,.0f} UZS* ({date_label})"
                 )
 
             else:
@@ -512,9 +527,9 @@ async def handle_message(message: types.Message) -> None:
             await message.answer(
                 "🤔 Не удалось понять сообщение.\n"
                 "Попробуйте написать, например:\n"
-                "• `кирпич 1000`\n"
-                "• `прораб 5000`\n"
-                "• `цемент 500, песок 300`",
+                "• `кирпич - 1000000`\n"
+                "• `прорабу - 5000000`\n"
+                "• `Арматура 16 - 500000`",
             )
         else:
             await message.answer(

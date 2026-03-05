@@ -1,8 +1,9 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -18,12 +19,12 @@ class Base(DeclarativeBase):
 
 
 class Category(Base):
-    """Material / work categories (brick, cement, plumbing …)."""
+    """Material / work categories — NOT unique, same name can repeat."""
 
     __tablename__ = "categories"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)  # NOT unique
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -35,7 +36,7 @@ class Category(Base):
 
 
 class Expense(Base):
-    """All expenses — both direct and foreman-reported."""
+    """All expenses — everything goes through the foreman."""
 
     __tablename__ = "expenses"
 
@@ -47,6 +48,7 @@ class Expense(Base):
     is_foreman_expense: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false"
     )
+    expense_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -54,14 +56,11 @@ class Expense(Base):
     category: Mapped["Category"] = relationship(back_populates="expenses")
 
     def __repr__(self) -> str:
-        return f"<Expense id={self.id} amount={self.amount} cat={self.category_id} foreman={self.is_foreman_expense}>"
+        return f"<Expense id={self.id} amount={self.amount} cat={self.category_id} date={self.expense_date}>"
 
 
 class ForemanTransaction(Base):
-    """
-    Money given to a foreman.
-    Outstanding balance = sum(ForemanTransaction.amount) - sum(Expense.amount WHERE is_foreman_expense).
-    """
+    """Money given to a foreman."""
 
     __tablename__ = "foreman_transactions"
 
@@ -69,9 +68,10 @@ class ForemanTransaction(Base):
     amount: Mapped[float] = mapped_column(Float, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expense_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
     def __repr__(self) -> str:
-        return f"<ForemanTx id={self.id} amount={self.amount}>"
+        return f"<ForemanTx id={self.id} amount={self.amount} date={self.expense_date}>"
