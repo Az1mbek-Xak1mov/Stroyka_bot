@@ -154,6 +154,23 @@ async def get_foreman_balance(session: AsyncSession, user_id: int) -> dict:
     }
 
 
+# ── Detailed expenses list (for /report2) ────────────────────────────────────
+
+async def get_all_expenses_with_category(
+    session: AsyncSession, user_id: int
+) -> list[Expense]:
+    """Return ALL expenses for this user, ordered by expense_date, with category."""
+    result = await session.execute(
+        select(Expense)
+        .where(Expense.telegram_user_id == user_id)
+        .order_by(Expense.expense_date.asc(), Expense.created_at.asc())
+    )
+    expenses = list(result.scalars().all())
+    for exp in expenses:
+        await session.refresh(exp, ["category"])
+    return expenses
+
+
 # ── Expense management (edit / delete) ────────────────────────────────────────
 
 async def get_recent_expenses(

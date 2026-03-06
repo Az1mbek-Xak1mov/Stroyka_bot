@@ -63,7 +63,8 @@ async def cmd_start(message: types.Message) -> None:
         "• `прорабу - 5000000`\n"
         "• Дата в сообщении: `28.02.2026`\n\n"
         "*Команды:*\n"
-        "/report — отчёт по расходам\n"
+        "/report — сводный отчёт по категориям\n"
+        "/report2 — подробный отчёт (каждый расход)\n"
         "/expenses — последние расходы (✏️/🗑️)\n"
         "/edit `<id> <сумма>` — изменить сумму\n"
         "/delete `<id>` — удалить расход\n"
@@ -105,6 +106,60 @@ async def cmd_report(message: types.Message) -> None:
     lines.append(f"👷 *Остаток у прораба:* {foreman_balance['outstanding']:,.0f} UZS")
 
     await message.answer("\n".join(lines))
+
+
+# ── /report2 — detailed list of every expense with date ──────────────────────
+
+@router.message(Command("report2"))
+async def cmd_report2(message: types.Message) -> None:
+    user_id = message.from_user.id
+    async with async_session() as session:
+        expenses = await crud.get_all_expenses_with_category(session, user_id)
+        foreman_txs = await crud.get_all_foreman_transactions(session, user_id)
+        total = await crud.get_total_expenses(session, user_id)
+        foreman_balance = await crud.get_foreman_balance(session, user_id)
+
+    if not expenses and not foreman_txs:
+        await message.answer("📋 Записей пока нет.")
+        return
+
+    lines = ["📋 *Подробный отчёт*\n"]
+
+    for exp in expenses:
+        cat_name = exp.category.name if exp.category else "—"
+        d = exp.expense_date
+        date_str = d.strftime("%d.%m") if d else "—"
+        lines.append(f"{date_str}  *{cat_name}* — {exp.amount:,.0f} UZS")
+
+    if foreman_txs:
+        lines.append("\n💰 *Выдано прорабу:*")
+        for tx in foreman_txs:
+            d = tx.expense_date
+            date_str = d.strftime("%d.%m") if d else "—"
+            desc = tx.description or ""
+            lines.append(f"{date_str}  прорабу — {tx.amount:,.0f} UZS")
+
+    lines.append(f"\n💰 *Итого расходов:* {total:,.0f} UZS")
+    lines.append(f"👷 *Выдано прорабу:* {foreman_balance['total_given']:,.0f} UZS")
+    lines.append(f"👷 *Остаток у прораба:* {foreman_balance['outstanding']:,.0f} UZS")
+
+    # Telegram message limit is 4096 chars; split if needed
+    text = "\n".join(lines)
+    if len(text) <= 4096:
+        await message.answer(text)
+    else:
+        # Split into chunks
+        chunk: list[str] = []
+        chunk_len = 0
+        for line in lines:
+            if chunk_len + len(line) + 1 > 4000:
+                await message.answer("\n".join(chunk))
+                chunk = []
+                chunk_len = 0
+            chunk.append(line)
+            chunk_len += len(line) + 1
+        if chunk:
+            await message.answer("\n".join(chunk))
 
 
 # ── /categories ───────────────────────────────────────────────────────────────
